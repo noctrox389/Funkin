@@ -4,7 +4,7 @@
 name: Build Android APK
 
 on:
-  workflow_dispatch:  # Solo se ejecuta manualmente (botón "Run workflow")
+  workflow_dispatch:
     inputs:
       build_type:
         description: 'Tipo de build'
@@ -18,14 +18,14 @@ on:
 jobs:
   build-android:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
-          # Si los submódulos privados fallan, comenta la línea de arriba y descomenta esto:
+          # Si falla por submódulos privados, cambia a:
           # submodules: false
 
       - name: Setup Java (JDK 17)
@@ -41,53 +41,93 @@ jobs:
 
       - name: Install Android NDK 29.0.13113456
         run: |
-          sdkmanager --install "ndk;29.0.13113456"
+          yes | sdkmanager --install "ndk;29.0.13113456" || sdkmanager --install "ndk;29.0.13113456"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.13113456" >> $GITHUB_ENV
           echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/29.0.13113456" >> $GITHUB_ENV
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          ls -la $ANDROID_HOME/ndk/ || true
 
       - name: Setup Haxe
         uses: krdlab/setup-haxe@v1
         with:
           haxe-version: 4.3.6
 
-      - name: Install Haxe libraries (hmm)
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev g++
+
+      - name: Install Haxe libraries with hmm
         run: |
           haxelib --global install hmm
           haxelib --global run hmm setup
-          # Intentamos instalar las dependencias del proyecto
+          
+          # Instalar dependencias del proyecto
           if [ -f hmm.json ]; then
-            haxelib --global run hmm install || true
+            echo "=== Instalando dependencias desde hmm.json ==="
+            haxelib --global run hmm install
+          else
+            echo "No se encontró hmm.json, instalando lime manualmente"
+            haxelib install lime
+            haxelib install openfl
+            haxelib install flixel
           fi
+          
           haxelib --global list
+          echo "=== Contenido de .haxelib ==="
+          ls -la .haxelib/ || true
+          ls -la .haxelib/lime/ || true
 
-      - name: Setup Lime
+      - name: Rebuild Lime native libraries (importante)
         run: |
-          haxelib install lime
-          haxelib run lime setup
-          # Configurar Android en Lime (modo no interactivo)
-          haxelib run lime setup android -y || true
-          # Forzar rutas
-          echo "android.sdk=$ANDROID_HOME" >> ~/.lime/config
-          echo "android.ndk=$ANDROID_NDK_HOME" >> ~/.lime/config
-          echo "java.path=$JAVA_HOME" >> ~/.lime/config
+          echo "=== Reconstruyendo Lime (ndll) ==="
+          # Esto es lo que faltaba y causó el error
+          haxelib run lime rebuild linux -64 || haxelib run lime rebuild cpp || true
+          haxelib run lime rebuild hxcpp || true
+          
+          # Verificar que exista el ndll
+          find .haxelib -name "lime.ndll" 2>/dev/null || echo "Aún no se encuentra lime.ndll"
+          find /home/runner -name "lime.ndll" 2>/dev/null | head -5 || true
+
+      - name: Configure Lime for Android
+        run: |
+          haxelib run lime setup || true
+          
+          # Crear/actualizar configuración de Lime
+          mkdir -p ~/.lime
+          cat > ~/.lime/config << EOF
+          android.sdk=$ANDROID_HOME
+          android.ndk=$ANDROID_NDK_HOME
+          java.path=$JAVA_HOME
+          EOF
+          
+          echo "=== Config de Lime ==="
           cat ~/.lime/config || true
+          
+          # Intentar setup android (no interactivo)
+          haxelib run lime setup android -y || true
 
-      - name: Rebuild Lime for Android (puede tardar)
+      - name: Rebuild Lime for Android target
         run: |
+          echo "=== Rebuild para Android ==="
           haxelib run lime rebuild android || true
           haxelib run lime rebuild hxcpp || true
 
       - name: Build APK
         run: |
           echo "=== Iniciando build de Android ==="
-          # Intentamos primero con debug (más fácil)
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          echo "JAVA_HOME=$JAVA_HOME"
+          
           if [ "${{ github.event.inputs.build_type }}" = "release" ]; then
-            haxelib run lime build android -v -release || haxelib run lime build android -v
+            haxelib run lime build android -v -release
           else
-            haxelib run lime build android -v -debug || haxelib run lime build android -v
+            haxelib run lime build android -v -debug
           fi
 
       - name: Find and upload APK
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: Funkin-Android-APK
@@ -96,14 +136,15 @@ jobs:
             export/release/android/**/*.apk
             export/debug/android/**/*.apk
             **/app/build/outputs/apk/**/*.apk
+            **/*.apk
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 5
 
       - name: List generated files (debug)
         if: always()
         run: |
-          echo "=== Archivos generados ==="
-          find export -name "*.apk" 2>/dev/null || echo "No se encontró ningún APK"
-          find . -name "*.apk" 2>/dev/null | head -20 || true
-          ls -la export/ 2>/dev/null || true
+          echo "=== Buscando APKs ==="
+          find . -name "*.apk" 2>/dev/null || echo "No se encontró ningún APK"
+          echo "=== Contenido de export/ ==="
+          ls -laR export/ 2>/dev/null || echo "No existe carpeta export"
           
