@@ -1,0 +1,109 @@
+# Workflow simplificado para intentar compilar APK de Friday Night Funkin' en GitHub Actions
+# Coloca este archivo en: .github/workflows/build-android.yml
+
+name: Build Android APK
+
+on:
+  workflow_dispatch:  # Solo se ejecuta manualmente (botón "Run workflow")
+    inputs:
+      build_type:
+        description: 'Tipo de build'
+        required: true
+        default: 'debug'
+        type: choice
+        options:
+          - debug
+          - release
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          # Si los submódulos privados fallan, comenta la línea de arriba y descomenta esto:
+          # submodules: false
+
+      - name: Setup Java (JDK 17)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'tools platform-tools platforms;android-35 platforms;android-29 build-tools;35.0.0'
+
+      - name: Install Android NDK 29.0.13113456
+        run: |
+          sdkmanager --install "ndk;29.0.13113456"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.13113456" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/29.0.13113456" >> $GITHUB_ENV
+
+      - name: Setup Haxe
+        uses: krdlab/setup-haxe@v1
+        with:
+          haxe-version: 4.3.6
+
+      - name: Install Haxe libraries (hmm)
+        run: |
+          haxelib --global install hmm
+          haxelib --global run hmm setup
+          # Intentamos instalar las dependencias del proyecto
+          if [ -f hmm.json ]; then
+            haxelib --global run hmm install || true
+          fi
+          haxelib --global list
+
+      - name: Setup Lime
+        run: |
+          haxelib install lime
+          haxelib run lime setup
+          # Configurar Android en Lime (modo no interactivo)
+          haxelib run lime setup android -y || true
+          # Forzar rutas
+          echo "android.sdk=$ANDROID_HOME" >> ~/.lime/config
+          echo "android.ndk=$ANDROID_NDK_HOME" >> ~/.lime/config
+          echo "java.path=$JAVA_HOME" >> ~/.lime/config
+          cat ~/.lime/config || true
+
+      - name: Rebuild Lime for Android (puede tardar)
+        run: |
+          haxelib run lime rebuild android || true
+          haxelib run lime rebuild hxcpp || true
+
+      - name: Build APK
+        run: |
+          echo "=== Iniciando build de Android ==="
+          # Intentamos primero con debug (más fácil)
+          if [ "${{ github.event.inputs.build_type }}" = "release" ]; then
+            haxelib run lime build android -v -release || haxelib run lime build android -v
+          else
+            haxelib run lime build android -v -debug || haxelib run lime build android -v
+          fi
+
+      - name: Find and upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Funkin-Android-APK
+          path: |
+            export/**/*.apk
+            export/release/android/**/*.apk
+            export/debug/android/**/*.apk
+            **/app/build/outputs/apk/**/*.apk
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: List generated files (debug)
+        if: always()
+        run: |
+          echo "=== Archivos generados ==="
+          find export -name "*.apk" 2>/dev/null || echo "No se encontró ningún APK"
+          find . -name "*.apk" 2>/dev/null | head -20 || true
+          ls -la export/ 2>/dev/null || true
+          
